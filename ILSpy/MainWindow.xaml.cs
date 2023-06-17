@@ -25,6 +25,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -57,6 +58,12 @@ using ICSharpCode.TreeView;
 
 using Microsoft.Win32;
 
+using NetSparkleUpdater;
+using NetSparkleUpdater.Configurations;
+using NetSparkleUpdater.Enums;
+using NetSparkleUpdater.SignatureVerifiers;
+using NetSparkleUpdater.UI.WPF;
+
 namespace ICSharpCode.ILSpy
 {
 	/// <summary>
@@ -71,6 +78,8 @@ namespace ICSharpCode.ILSpy
 		FilterSettings filterSettings;
 		AssemblyList assemblyList;
 		AssemblyListTreeNode assemblyListTreeNode;
+
+		SparkleUpdater _sparkle;
 
 		static MainWindow instance;
 
@@ -895,6 +904,66 @@ namespace ICSharpCode.ILSpy
 			}
 
 			Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => OpenAssemblies(spySettings)));
+
+
+			var s = new UpdateSettings(spySettings);
+			bool automaticCheckingEnabled = s.AutomaticUpdateCheckEnabled;
+
+			// TODO: That would need to be way more sophisticated - we ship zip, msi, vsix (actually doing an update-check there is wrong even today)
+			//       Multiple of those could be installed on the same machine in multiple versions (esp. zip)
+			//       Somehow we'd need to "tag" the version running from our msi installer, and only then offering auto-update (eg MsiInstaller.txt marker file)
+			//       And then have an IUpdateService with one impl existing plus one for auto-updating
+
+#if DEBUG
+			// automaticCheckingEnabled = false;
+#endif
+			// TODO: Additional check if branch version
+
+			if (automaticCheckingEnabled)
+				EnableSparkleUpdateChecking();
+		}
+
+		void EnableSparkleUpdateChecking()
+		{
+			// We'd need two appcast.xml's, one for x64 and one for arm64
+			if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+				return;
+
+			// This should update with UpdateTheme
+			bool isLightTheme = ThemeManager.Current.Theme.Contains("light", StringComparison.InvariantCultureIgnoreCase);
+
+			var extraHeadAdditionForReleaseNotes = "<style>";
+			if (!isLightTheme)
+			{
+				extraHeadAdditionForReleaseNotes +=
+					"body {background-color: #212121; } " +
+					"h1, h2, li { color: #e8e8e8; } ";
+			}
+			extraHeadAdditionForReleaseNotes +=
+				"h1, h2 { margin-top: -8px; margin-left: 6px; } ";
+			extraHeadAdditionForReleaseNotes += "</style>";
+
+			// https://github.com/NetSparkleUpdater/NetSparkle/blob/develop/src/NetSparkle.Samples.NetCore.WPF/MainWindow.xaml.cs
+			string sparkleSettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ICSharpCode\\ILSpy-sparkle.json");
+
+			_sparkle = new SparkleUpdater(
+				"https://ilspy.net/appcast.xml",
+				new Ed25519Checker(SecurityMode.Strict, "s2P6MPexSRSjod77aWUjgVKj/gKYYAeqgHY/0Gf8b78=")
+			) {
+				UIFactory = new UIFactory(Images.ILSpyIcon) {
+					UseStaticUpdateWindowBackgroundColor = false,
+					AdditionalReleaseNotesHeaderHTML = extraHeadAdditionForReleaseNotes,
+					ProcessWindowAfterInit = (w, f) => {
+						w.Style = (Style)Application.Current.FindResource("DialogWindow");
+					}
+				},
+				ShowsUIOnMainThread = true,
+				RelaunchAfterUpdate = false,
+				CustomInstallerArguments = "",
+				Configuration = new JSONConfiguration(new NetSparkleUpdater.AssemblyAccessors.AssemblyReflectionAccessor(null), sparkleSettingsPath)
+			};
+
+			_sparkle.StartLoop(true);
 		}
 
 		void OpenAssemblies(ILSpySettings spySettings)
@@ -951,6 +1020,9 @@ namespace ICSharpCode.ILSpy
 
 		public async Task ShowMessageIfUpdatesAvailableAsync(ILSpySettings spySettings, bool forceCheck = false)
 		{
+			// TODO: Properly replace old code-paths, this is for UI testing of Netsparkle only
+			var info = await _sparkle.CheckForUpdatesAtUserRequest();
+
 			string downloadUrl;
 			if (forceCheck)
 			{
